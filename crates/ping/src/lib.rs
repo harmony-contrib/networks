@@ -12,7 +12,7 @@ use pnet::packet::icmpv6::{Icmpv6Code, Icmpv6Types};
 use pnet::packet::Packet;
 use socket2::{Domain, Protocol, Socket, Type};
 
-mod buf;
+use buffer::UninitBuffer;
 
 const ICMP_HEADER_SIZE: usize = 8;
 const ICMP_PAYLOAD_SIZE: usize = 32;
@@ -166,7 +166,7 @@ fn send_ping_v4(
         )
         .map_err(|e| Error::from_reason(format!("Failed to send packet: {}", e)))?;
 
-    let mut recv_buf = buf::UninitBuffer::new(2048);
+    let mut recv_buf = UninitBuffer::new(2048);
     match socket.recv_from(recv_buf.as_mut_slice()) {
         Ok((_, _)) => {
             let duration = start.elapsed();
@@ -221,7 +221,7 @@ fn send_ping_v6(
         )
         .map_err(|e| Error::from_reason(format!("Failed to send packet: {}", e)))?;
 
-    let mut recv_buf = buf::UninitBuffer::new(2048);
+    let mut recv_buf = UninitBuffer::new(2048);
     match socket.recv_from(recv_buf.as_mut_slice()) {
         Ok((_, _)) => {
             let duration = start.elapsed();

@@ -65,6 +65,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b048fb63fd8b5923fc5aa7b340d8e156aec7ec02f0c78fa8a6ddc2613f6f71de"
 
 [[package]]
+name = "buffer"
+version = "0.1.0"
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -431,6 +435,7 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 name = "ping"
 version = "0.0.1"
 dependencies = [
+ "buffer",
  "napi-build-ohos",
  "napi-derive-ohos",
  "napi-ohos",
@@ -771,6 +776,18 @@ dependencies = [
  "pin-project-lite",
  "socket2",
  "windows-sys",
+]
+
+[[package]]
+name = "traceroute"
+version = "0.1.0"
+dependencies = [
+ "buffer",
+ "napi-build-ohos",
+ "napi-derive-ohos",
+ "napi-ohos",
+ "pnet",
+ "socket2",
 ]
 
 [[package]]

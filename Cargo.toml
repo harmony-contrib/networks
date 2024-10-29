@@ -1,8 +1,13 @@
 [workspace]
-members  = ["crates/*"]
+members  = ["buffer", "crates/*"]
 resolver = "2"
 
 [workspace.dependencies]
 napi-ohos        = { version = "1.0.1" }
 napi-derive-ohos = { version = "1.0.1" }
 napi-build-ohos  = { version = "1.0.1" }
+
+buffer = { path = "buffer" }
+
+pnet    = { version = "0.33" }
+socket2 = { version = "0.5" }
