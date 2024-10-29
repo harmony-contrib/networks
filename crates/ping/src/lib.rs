@@ -1,91 +1,264 @@
-use std::time::Instant;
-use std::{net::SocketAddr, sync::Arc};
-
-use config::{Address, Config};
-use result::{PingResponse, Status};
+use std::net::{IpAddr, ToSocketAddrs};
+use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use napi_derive_ohos::napi;
-use napi_ohos::Error;
-use pnet::packet::icmp::echo_reply::EchoReplyPacket;
-use pnet::packet::icmp::echo_request::{IcmpCodes, MutableEchoRequestPacket};
-use pnet::packet::icmp::IcmpTypes;
-use pnet::packet::{util, MutablePacket, Packet};
+use napi_ohos::bindgen_prelude::*;
+use napi_ohos::{Env, Task};
+use pnet::packet::icmp::echo_request::MutableEchoRequestPacket;
+use pnet::packet::icmp::{IcmpCode, IcmpPacket, IcmpTypes};
+use pnet::packet::icmpv6::echo_request::MutableEchoRequestPacket as Ipv6MutableEchoRequestPacket;
+use pnet::packet::icmpv6::{Icmpv6Code, Icmpv6Types};
+use pnet::packet::Packet;
 use socket2::{Domain, Protocol, Socket, Type};
 
-mod config;
-mod result;
+mod buf;
 
+const ICMP_HEADER_SIZE: usize = 8;
+const ICMP_PAYLOAD_SIZE: usize = 32;
+const BUFFER_SIZE: usize = ICMP_HEADER_SIZE + ICMP_PAYLOAD_SIZE;
+
+#[derive(Debug)]
 #[napi(object)]
-pub struct PingOption {
-    /// ping地址
-    pub addr: String,
-    /// 请求次数
-    pub count: Option<u32>,
-    /// 超时时间 单位：ms
-    pub timeout: Option<u32>,
-    /// 启动线程数
-    pub thread: Option<u32>,
+pub struct PingResult {
+    pub host: String,
+    pub ip: String,
+    pub sequence: u16,
+    pub ttl: u32,
+    pub rtt_ms: f64,
+    pub success: bool,
+    pub error: Option<String>,
+    pub ip_version: u8,
 }
 
-#[napi]
-pub struct Ping {
-    config: Config,
-    dest: SocketAddr,
-    socket: Arc<Socket>,
+#[derive(Debug)]
+#[napi(object)]
+pub struct PingOptions {
+    pub count: u32,
+    pub timeout: u32,
+    pub interval: u32,
+    #[napi(ts_type = "'v4' | 'v6' | 'auto'")]
+    pub ip_version: Option<String>,
 }
 
-#[napi]
-impl Ping {
-    #[napi(constructor)]
-    pub fn new(option: PingOption) -> napi::Result<Ping> {
-        let host = option.addr.as_str();
-        let address = Address::parse(host)?;
-        let config = Config {
-            addr: address,
-            count: option.count.unwrap_or(10),
-            timeout: option.timeout.unwrap_or(5000),
-            thread: option.thread.unwrap_or(5),
+struct PingTask {
+    host: String,
+    options: PingOptions,
+}
+
+impl Task for PingTask {
+    type Output = Vec<PingResult>;
+    type JsValue = Vec<PingResult>;
+
+    fn compute(&mut self) -> napi_ohos::Result<Self::Output> {
+        let preferred_ip_version = self.options.ip_version.as_deref().unwrap_or("auto");
+
+        let ip_addr = match IpAddr::from_str(&self.host) {
+            Ok(ip) => ip,
+            Err(_) => {
+                // 如果不是有效的 IP 地址，尝试进行 DNS 解析
+                let addrs: Vec<_> = (self.host.clone(), 0)
+                    .to_socket_addrs()
+                    .map_err(|e| {
+                        Error::from_reason(format!("Failed to resolve host: {}", e.to_string()))
+                    })?
+                    .map(|addr| addr.ip())
+                    .collect();
+
+                if addrs.is_empty() {
+                    return Err(Error::from_reason("No IP address found for host"));
+                }
+
+                match preferred_ip_version {
+                    "v4" => addrs.into_iter().find(|ip| ip.is_ipv4()),
+                    "v6" => addrs.into_iter().find(|ip| ip.is_ipv6()),
+                    _ => Some(addrs[0]),
+                }
+                .ok_or_else(|| {
+                    Error::from_reason(format!(
+                        "No {} address found for host",
+                        preferred_ip_version
+                    ))
+                })?
+            }
         };
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4))?;
-        let dest = SocketAddr::new(config.addr.ip, 0);
-        Ok(Self {
-            config,
-            socket: Arc::new(socket),
-            dest,
-        })
+
+        let mut results = Vec::new();
+
+        match ip_addr {
+            IpAddr::V4(ipv4) => {
+                let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4))
+                    .map_err(|e| {
+                        Error::from_reason(format!(
+                            "Failed to create IPv4 socket: {}",
+                            e.to_string()
+                        ))
+                    })?;
+
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(self.options.timeout as u64)))
+                    .map_err(|e| {
+                        Error::from_reason(format!("Failed to set read timeout: {}", e))
+                    })?;
+
+                for sequence in 0..self.options.count {
+                    let result = send_ping_v4(&socket, &self.host, ipv4, sequence as u16)?;
+                    results.push(result);
+                    std::thread::sleep(Duration::from_millis(self.options.interval as u64));
+                }
+            }
+            IpAddr::V6(ipv6) => {
+                let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::ICMPV6))
+                    .map_err(|e| {
+                        Error::from_reason(format!("Failed to create IPv6 socket: {}", e))
+                    })?;
+
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(self.options.timeout as u64)))
+                    .map_err(|e| {
+                        Error::from_reason(format!("Failed to set read timeout: {}", e))
+                    })?;
+
+                for sequence in 0..self.options.count {
+                    let result = send_ping_v6(&socket, &self.host, ipv6, sequence as u16)?;
+                    results.push(result);
+                    std::thread::sleep(Duration::from_millis(self.options.interval as u64));
+                }
+            }
+        }
+
+        Ok(results)
     }
 
-    #[napi]
-    pub fn ping(&self) -> napi::Result<Vec<PingResponse>> {
-        // create icmp request packet
-        let mut buf = vec![0; 64];
-        let mut icmp = MutableEchoRequestPacket::new(&mut buf[..])
-            .ok_or(Error::from_reason("Create ICMP packet failed"))?;
-        icmp.set_icmp_type(IcmpTypes::EchoRequest);
-        icmp.set_icmp_code(IcmpCodes::NoCode);
-        icmp.set_sequence_number(1);
-        icmp.set_identifier(2134);
-        icmp.set_checksum(util::checksum(icmp.packet(), 1));
-
-        let start = Instant::now();
-
-        // send request
-        self.socket.send_to(icmp.packet_mut(), &self.dest.into())?;
-
-        // handle recv
-        let mut mem_buf =
-            unsafe { &mut *(buf.as_mut_slice() as *mut [u8] as *mut [std::mem::MaybeUninit<u8>]) };
-        let (_size, _) = self.socket.recv_from(&mut mem_buf)?;
-
-        let duration = start.elapsed().as_micros() as f64 / 1000.0;
-        let _reply = EchoReplyPacket::new(&buf)
-            .ok_or(Error::from_reason("Get ICMP response packet failed"))?;
-        let response = PingResponse {
-            status: Status::Success,
-            ttl: duration,
-            dest: self.config.addr.ip.to_string(),
-        };
-        let result: Vec<PingResponse> = vec![response];
-        Ok(result)
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi_ohos::Result<Self::JsValue> {
+        Ok(output)
     }
+}
+
+fn send_ping_v4(
+    socket: &Socket,
+    host: &str,
+    ip: std::net::Ipv4Addr,
+    sequence: u16,
+) -> napi_ohos::Result<PingResult> {
+    let mut buf = vec![0; BUFFER_SIZE];
+    let mut packet = MutableEchoRequestPacket::new(&mut buf)
+        .ok_or_else(|| Error::from_reason("Failed to create ICMPv4 packet"))?;
+
+    packet.set_icmp_type(IcmpTypes::EchoRequest);
+    packet.set_icmp_code(IcmpCode::new(0));
+    packet.set_sequence_number(sequence);
+    packet.set_identifier(std::process::id() as u16);
+
+    let checksum = pnet::packet::icmp::checksum(&IcmpPacket::new(packet.packet()).unwrap());
+    packet.set_checksum(checksum);
+
+    let start = Instant::now();
+
+    socket
+        .send_to(
+            packet.packet(),
+            &std::net::SocketAddr::new(IpAddr::V4(ip), 0).into(),
+        )
+        .map_err(|e| Error::from_reason(format!("Failed to send packet: {}", e)))?;
+
+    let mut recv_buf = buf::UninitBuffer::new(2048);
+    match socket.recv_from(recv_buf.as_mut_slice()) {
+        Ok((_, _)) => {
+            let duration = start.elapsed();
+            let ttl = socket.ttl().unwrap_or(0);
+
+            Ok(PingResult {
+                host: host.to_string(),
+                ip: ip.to_string(),
+                sequence,
+                ttl,
+                rtt_ms: duration.as_secs_f64() * 1000.0,
+                success: true,
+                error: None,
+                ip_version: 4,
+            })
+        }
+        Err(e) => Ok(PingResult {
+            host: host.to_string(),
+            ip: ip.to_string(),
+            sequence,
+            ttl: 0,
+            rtt_ms: 0.0,
+            success: false,
+            error: Some(e.to_string()),
+            ip_version: 4,
+        }),
+    }
+}
+
+fn send_ping_v6(
+    socket: &Socket,
+    host: &str,
+    ip: std::net::Ipv6Addr,
+    sequence: u16,
+) -> napi_ohos::Result<PingResult> {
+    let mut buf = vec![0; BUFFER_SIZE];
+    let mut packet = Ipv6MutableEchoRequestPacket::new(&mut buf)
+        .ok_or_else(|| Error::from_reason("Failed to create ICMPv6 packet"))?;
+
+    packet.set_icmpv6_type(Icmpv6Types::EchoRequest);
+    packet.set_icmpv6_code(Icmpv6Code::new(0));
+    packet.set_sequence_number(sequence);
+    packet.set_identifier(std::process::id() as u16);
+
+    // ICMPv6 校验和由内核自动计算
+    let start = Instant::now();
+
+    socket
+        .send_to(
+            packet.packet(),
+            &std::net::SocketAddr::new(IpAddr::V6(ip), 0).into(),
+        )
+        .map_err(|e| Error::from_reason(format!("Failed to send packet: {}", e)))?;
+
+    let mut recv_buf = buf::UninitBuffer::new(2048);
+    match socket.recv_from(recv_buf.as_mut_slice()) {
+        Ok((_, _)) => {
+            let duration = start.elapsed();
+            let ttl = socket.ttl().unwrap_or(0);
+
+            Ok(PingResult {
+                host: host.to_string(),
+                ip: ip.to_string(),
+                sequence,
+                ttl,
+                rtt_ms: duration.as_secs_f64() * 1000.0,
+                success: true,
+                error: None,
+                ip_version: 6,
+            })
+        }
+        Err(e) => Ok(PingResult {
+            host: host.to_string(),
+            ip: ip.to_string(),
+            sequence,
+            ttl: 0,
+            rtt_ms: 0.0,
+            success: false,
+            error: Some(e.to_string()),
+            ip_version: 6,
+        }),
+    }
+}
+
+#[allow(unused)]
+#[napi(ts_return_type = "Promise<PingResult[]>")]
+fn ping_async(host: String, options: Option<PingOptions>) -> AsyncTask<PingTask> {
+    let opts = options.unwrap_or(PingOptions {
+        count: 4,
+        timeout: 1000,
+        interval: 1000,
+        ip_version: None,
+    });
+
+    AsyncTask::new(PingTask {
+        host,
+        options: opts,
+    })
 }

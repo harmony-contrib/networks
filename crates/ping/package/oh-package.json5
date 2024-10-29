@@ -1,8 +1,8 @@
 {
   license: "MIT",
-  author: "southorange0929",
+  author: "richerfu",
   name: "@ohos-rs/ping",
-  description: "",
+  description: "Ping for OpenHarmony/HarmonyNext powered by ohos-rs",
   main: "index.ets",
   version: "0.0.1",
   types: "libs/index.d.ts",

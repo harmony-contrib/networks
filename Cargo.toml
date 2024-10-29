@@ -3,6 +3,6 @@ members  = ["crates/*"]
 resolver = "2"
 
 [workspace.dependencies]
-napi-ohos        = { version = "1.0.0-beta.6" }
-napi-derive-ohos = { version = "1.0.0-beta.6" }
-napi-build-ohos  = { version = "1.0.0-beta.6" }
+napi-ohos        = { version = "1.0.1" }
+napi-derive-ohos = { version = "1.0.1" }
+napi-build-ohos  = { version = "1.0.1" }
