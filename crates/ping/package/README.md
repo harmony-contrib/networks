@@ -34,6 +34,8 @@ export declare function pingAsync(host: string, options?: PingOptions | undefine
 
 ## Usage
 
+Before use it, please add permission `ohos.permission.INTERNET` to `module.json5`.
+
 ```ts
 const ret = await pingAsync("www.baidu.com");
 ```
