@@ -130,8 +130,12 @@ impl Task for PingTask {
         Ok(results)
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi_ohos::Result<Self::JsValue> {
+    fn resolve(&mut self, _: Env, output: Self::Output) -> napi_ohos::Result<Self::JsValue> {
         Ok(output)
+    }
+
+    fn reject(&mut self, _: Env, err: Error) -> Result<Self::JsValue> {
+        Err(err)
     }
 }
 
