@@ -9,8 +9,9 @@ use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::Packet;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::Ipv6Addr;
+use std::str::FromStr;
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
     time::{Duration, Instant},
 };
 
@@ -19,17 +20,26 @@ const ICMP_PAYLOAD_SIZE: usize = 32;
 const BUFFER_SIZE: usize = ICMP_HEADER_SIZE + ICMP_PAYLOAD_SIZE;
 
 #[derive(Debug)]
-struct TraceTask {
-    target: String,
-    max_hops: u32,
+#[napi(object)]
+struct TraceOption {
+    pub max_hops: u32,
+    pub timeout: u32,
+    #[napi(ts_type = "'v4' | 'v6' | 'auto'")]
+    pub ip_version: Option<String>,
 }
 
 #[derive(Debug)]
+struct TraceTask {
+    target: String,
+    option: TraceOption,
+}
+
+#[derive(Debug, Clone)]
 #[napi(object)]
 struct HopResult {
     pub hop: u32,
     pub addr: Option<String>,
-    pub rtt: f64,
+    pub rtt: Vec<f64>,
 }
 
 impl Task for TraceTask {
@@ -37,10 +47,36 @@ impl Task for TraceTask {
     type JsValue = Vec<HopResult>;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        let dest_addr = self
-            .target
-            .parse::<IpAddr>()
-            .map_err(|e| Error::new(Status::InvalidArg, format!("Invalid IP address: {}", e)))?;
+        let preferred_ip_version = self.option.ip_version.as_deref().unwrap_or("auto");
+        let dest_addr = match IpAddr::from_str(&self.target) {
+            Ok(ip) => ip,
+            Err(_) => {
+                // 如果不是有效的 IP 地址，尝试进行 DNS 解析
+                let addrs: Vec<_> = (self.target.clone(), 0)
+                    .to_socket_addrs()
+                    .map_err(|e| {
+                        Error::from_reason(format!("Failed to resolve host: {}", e.to_string()))
+                    })?
+                    .map(|addr| addr.ip())
+                    .collect();
+
+                if addrs.is_empty() {
+                    return Err(Error::from_reason("No IP address found for host"));
+                }
+
+                match preferred_ip_version {
+                    "v4" => addrs.into_iter().find(|ip| ip.is_ipv4()),
+                    "v6" => addrs.into_iter().find(|ip| ip.is_ipv6()),
+                    _ => Some(addrs[0]),
+                }
+                .ok_or_else(|| {
+                    Error::from_reason(format!(
+                        "No {} address found for host",
+                        preferred_ip_version
+                    ))
+                })?
+            }
+        };
 
         match dest_addr {
             IpAddr::V4(ipv4) => self.trace_ipv4(ipv4),
@@ -59,6 +95,7 @@ impl Task for TraceTask {
 
 impl TraceTask {
     fn trace_ipv4(&self, dest_ip: Ipv4Addr) -> Result<Vec<HopResult>> {
+        let mut finished = false;
         let socket =
             Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).map_err(|e| {
                 Error::new(
@@ -67,48 +104,58 @@ impl TraceTask {
                 )
             })?;
 
-        socket.set_nonblocking(true).map_err(|e| {
-            Error::new(
-                Status::GenericFailure,
-                format!("Failed to set nonblocking: {}", e),
-            )
-        })?;
+        socket
+            .set_read_timeout(Some(Duration::from_millis(self.option.timeout as u64)))
+            .map_err(|e| Error::from_reason(format!("Failed to set read timeout: {}", e)))?;
+
+        let dest = SocketAddr::new(IpAddr::V4(dest_ip), 0);
 
         let mut results = Vec::new();
 
-        for ttl in 1..=self.max_hops {
+        'finish: for ttl in 1..=self.option.max_hops {
+            if finished {
+                break;
+            }
+
+            // TODO: OS will kill send if ttl is too small
             socket.set_ttl(ttl).map_err(|e| {
                 Error::new(Status::GenericFailure, format!("Failed to set TTL: {}", e))
             })?;
 
-            let start_time = Instant::now();
+            let mut res = HopResult {
+                hop: ttl,
+                addr: None,
+                rtt: Vec::new(),
+            };
 
-            // 创建 ICMP Echo 请求包
-            let mut icmp_buffer = [0u8; BUFFER_SIZE];
-            let mut icmp_packet = MutableEchoRequestPacket::new(&mut icmp_buffer).unwrap();
-            icmp_packet.set_icmp_type(IcmpTypes::EchoRequest);
-            icmp_packet.set_icmp_code(IcmpCode::new(0));
+            for _ in 0..3 {
+                let start_time = Instant::now();
 
-            icmp_packet.set_sequence_number(ttl as u16);
-            icmp_packet.set_identifier(std::process::id() as u16);
+                // 创建 ICMP Echo 请求包
+                let mut icmp_buffer = [0u8; BUFFER_SIZE];
+                let mut icmp_packet = MutableEchoRequestPacket::new(&mut icmp_buffer).unwrap();
+                icmp_packet.set_icmp_type(IcmpTypes::EchoRequest);
+                icmp_packet.set_icmp_code(IcmpCode::new(0));
 
-            let dest = SocketAddr::new(IpAddr::V4(dest_ip), 0);
-            socket
-                .send_to(icmp_packet.packet(), &dest.into())
-                .map_err(|e| {
-                    Error::new(
-                        Status::GenericFailure,
-                        format!("Failed to send packet: {}", e),
-                    )
-                })?;
+                icmp_packet.set_sequence_number(ttl as u16);
+                icmp_packet.set_identifier(std::process::id() as u16);
 
-            // 接收 ICMP Echo 回复
-            let mut recv_buffer = buffer::UninitBuffer::new(1024);
-            let timeout = Duration::from_secs(1);
-            let start = Instant::now();
-            let mut addr = None;
+                let checksum =
+                    pnet::packet::icmp::checksum(&IcmpPacket::new(icmp_packet.packet()).unwrap());
+                icmp_packet.set_checksum(checksum);
 
-            while start.elapsed() < timeout {
+                socket
+                    .send_to(icmp_packet.packet(), &dest.into())
+                    .map_err(|e| {
+                        Error::new(
+                            Status::GenericFailure,
+                            format!("Failed to send packet: {}", e),
+                        )
+                    })?;
+
+                // 接收 ICMP Echo 回复
+                let mut recv_buffer = buffer::UninitBuffer::new(2048);
+
                 match socket.recv_from(recv_buffer.as_mut_slice()) {
                     Ok((size, src_addr)) => {
                         if let Some(ipv4_packet) =
@@ -117,48 +164,37 @@ impl TraceTask {
                             let icmp_payload = ipv4_packet.payload();
 
                             if let Some(icmp) = IcmpPacket::new(icmp_payload) {
-                                if icmp.get_icmp_type() == IcmpTypes::EchoReply {
-                                    let rtt = start_time.elapsed().as_secs_f64() * 1000.0;
-                                    addr =
-                                        Some(src_addr.as_socket_ipv4().unwrap().ip().to_string());
-                                    results.push(HopResult {
-                                        hop: ttl,
-                                        addr: Some(
+                                match icmp.get_icmp_type() {
+                                    IcmpTypes::EchoReply => {
+                                        finished = true;
+                                        break 'finish;
+                                    }
+                                    IcmpTypes::TimeExceeded => {
+                                        let rtt = start_time.elapsed().as_secs_f64() * 1000.0;
+                                        res.rtt.push(rtt);
+                                        res.addr = Some(
                                             src_addr.as_socket_ipv4().unwrap().ip().to_string(),
-                                        ),
-                                        rtt,
-                                    });
-                                    break;
+                                        );
+                                        continue;
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(10));
+                    Err(_) => {
                         continue;
                     }
-                    Err(_) => continue,
                 }
             }
-
-            if addr.is_none() {
-                results.push(HopResult {
-                    hop: ttl,
-                    addr: None,
-                    rtt: -1.0,
-                });
-            }
-
-            if let Some(ref addr) = addr {
-                if addr == &dest_ip.to_string() {
-                    break;
-                }
-            }
+            results.push(res.clone());
         }
 
         Ok(results)
     }
+
     fn trace_ipv6(&self, dest_ip: Ipv6Addr) -> Result<Vec<HopResult>> {
+        let mut finished = false;
         let socket =
             Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::ICMPV6)).map_err(|e| {
                 Error::new(
@@ -167,16 +203,18 @@ impl TraceTask {
                 )
             })?;
 
-        socket.set_nonblocking(true).map_err(|e| {
-            Error::new(
-                Status::GenericFailure,
-                format!("Failed to set nonblocking: {}", e),
-            )
-        })?;
+        socket
+            .set_read_timeout(Some(Duration::from_millis(self.option.timeout as u64)))
+            .map_err(|e| Error::from_reason(format!("Failed to set read timeout: {}", e)))?;
+
+        let dest = SocketAddr::new(IpAddr::V6(dest_ip), 0);
 
         let mut results = Vec::new();
 
-        for ttl in 1..=self.max_hops {
+        'finish: for ttl in 1..=self.option.max_hops {
+            if finished {
+                break;
+            }
             socket.set_unicast_hops_v6(ttl).map_err(|e| {
                 Error::new(
                     Status::GenericFailure,
@@ -184,33 +222,35 @@ impl TraceTask {
                 )
             })?;
 
-            let start_time = Instant::now();
+            let mut res = HopResult {
+                hop: ttl,
+                addr: None,
+                rtt: Vec::new(),
+            };
 
-            // 创建 ICMPv6 Echo 请求包
-            let mut icmp_buffer = [0u8; BUFFER_SIZE];
-            let mut packet = Ipv6MutableEchoRequestPacket::new(&mut icmp_buffer)
-                .ok_or_else(|| Error::from_reason("Failed to create ICMPv6 packet"))?;
+            for _ in 0..3 {
+                let start_time = Instant::now();
 
-            packet.set_icmpv6_type(Icmpv6Types::EchoRequest);
-            packet.set_icmpv6_code(Icmpv6Code::new(0));
-            packet.set_sequence_number(ttl as u16);
-            packet.set_identifier(std::process::id() as u16);
+                // 创建 ICMPv6 Echo 请求包
+                let mut icmp_buffer = [0u8; BUFFER_SIZE];
+                let mut packet = Ipv6MutableEchoRequestPacket::new(&mut icmp_buffer)
+                    .ok_or_else(|| Error::from_reason("Failed to create ICMPv6 packet"))?;
 
-            let dest = SocketAddr::new(IpAddr::V6(dest_ip), 0);
-            socket.send_to(packet.packet(), &dest.into()).map_err(|e| {
-                Error::new(
-                    Status::GenericFailure,
-                    format!("Failed to send packet: {}", e),
-                )
-            })?;
+                packet.set_icmpv6_type(Icmpv6Types::EchoRequest);
+                packet.set_icmpv6_code(Icmpv6Code::new(0));
+                packet.set_sequence_number(ttl as u16);
+                packet.set_identifier(std::process::id() as u16);
 
-            // 接收 ICMPv6 Echo 回复
-            let mut recv_buffer = buffer::UninitBuffer::new(1024);
-            let timeout = Duration::from_secs(1);
-            let start = Instant::now();
-            let mut addr = None;
+                socket.send_to(packet.packet(), &dest.into()).map_err(|e| {
+                    Error::new(
+                        Status::GenericFailure,
+                        format!("Failed to send packet: {}", e),
+                    )
+                })?;
 
-            while start.elapsed() < timeout {
+                // 接收 ICMPv6 Echo 回复
+                let mut recv_buffer = buffer::UninitBuffer::new(2048);
+
                 match socket.recv_from(recv_buffer.as_mut_slice()) {
                     Ok((size, src_addr)) => {
                         if let Some(ipv6_packet) =
@@ -218,43 +258,30 @@ impl TraceTask {
                         {
                             let payload = ipv6_packet.payload();
                             if let Some(icmp) = Icmpv6Packet::new(payload) {
-                                if icmp.get_icmpv6_type() == Icmpv6Types::EchoReply {
-                                    let rtt = start_time.elapsed().as_secs_f64() * 1000.0;
-                                    addr =
-                                        Some(src_addr.as_socket_ipv6().unwrap().ip().to_string());
-                                    results.push(HopResult {
-                                        hop: ttl,
-                                        addr: Some(
+                                match icmp.get_icmpv6_type() {
+                                    Icmpv6Types::EchoReply => {
+                                        finished = true;
+                                        break 'finish;
+                                    }
+                                    Icmpv6Types::TimeExceeded => {
+                                        let rtt = start_time.elapsed().as_secs_f64() * 1000.0;
+                                        res.rtt.push(rtt);
+                                        res.addr = Some(
                                             src_addr.as_socket_ipv6().unwrap().ip().to_string(),
-                                        ),
-                                        rtt,
-                                    });
-                                    break;
+                                        );
+                                        continue;
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(10));
+                    Err(_) => {
                         continue;
                     }
-                    Err(_) => continue,
                 }
             }
-
-            if addr.is_none() {
-                results.push(HopResult {
-                    hop: ttl,
-                    addr: None,
-                    rtt: -1.0,
-                });
-            }
-
-            if let Some(ref addr) = addr {
-                if addr == &dest_ip.to_string() {
-                    break;
-                }
-            }
+            results.push(res.clone());
         }
 
         Ok(results)
@@ -262,12 +289,13 @@ impl TraceTask {
 }
 
 #[allow(unused)]
-#[napi]
-fn trace_route(target: String, max_hops: Option<u32>) -> AsyncTask<TraceTask> {
-    let task = TraceTask {
-        target,
-        max_hops: max_hops.unwrap_or(30),
-    };
+#[napi(ts_return_type = "Promise<HopResult[]>")]
+fn trace_route(target: String, options: Option<TraceOption>) -> AsyncTask<TraceTask> {
+    let option = options.unwrap_or(TraceOption {
+        max_hops: 30,
+        timeout: 1000,
+        ip_version: None,
+    });
 
-    AsyncTask::new(task)
+    AsyncTask::new(TraceTask { target, option })
 }

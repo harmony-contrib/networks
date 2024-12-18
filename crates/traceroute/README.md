@@ -1,5 +1,7 @@
 # `@ohos-rs/traceroute`
 
+## !Note: We use `ICMP(DGRAM)` to implement the traceroute, but HarmonyOS will block ICMP packets if ttl is too small.
+
 ## Install
 
 use`ohpm` to install package.
