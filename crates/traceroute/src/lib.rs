@@ -1,6 +1,5 @@
 use napi_derive_ohos::napi;
 use napi_ohos::{bindgen_prelude::*, Task};
-use ohos_hilog_binding::hilog_info;
 use pnet::packet::icmp::echo_request::MutableEchoRequestPacket;
 use pnet::packet::icmp::{IcmpCode, IcmpPacket, IcmpTypes};
 use pnet::packet::icmpv6::echo_request::MutableEchoRequestPacket as Ipv6MutableEchoRequestPacket;
@@ -21,9 +20,18 @@ const ICMP_PAYLOAD_SIZE: usize = 32;
 const BUFFER_SIZE: usize = ICMP_HEADER_SIZE + ICMP_PAYLOAD_SIZE;
 
 #[derive(Debug)]
+#[napi(object)]
+struct TraceOption {
+    pub max_hops: u32,
+    pub timeout: u32,
+    #[napi(ts_type = "'v4' | 'v6' | 'auto'")]
+    pub ip_version: Option<String>,
+}
+
+#[derive(Debug)]
 struct TraceTask {
     target: String,
-    max_hops: u32,
+    option: TraceOption,
 }
 
 #[derive(Debug, Clone)]
@@ -39,7 +47,7 @@ impl Task for TraceTask {
     type JsValue = Vec<HopResult>;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        let preferred_ip_version = "v4";
+        let preferred_ip_version = self.option.ip_version.as_deref().unwrap_or("auto");
         let dest_addr = match IpAddr::from_str(&self.target) {
             Ok(ip) => ip,
             Err(_) => {
@@ -97,18 +105,19 @@ impl TraceTask {
             })?;
 
         socket
-            .set_read_timeout(Some(Duration::from_millis(10000)))
+            .set_read_timeout(Some(Duration::from_millis(self.option.timeout as u64)))
             .map_err(|e| Error::from_reason(format!("Failed to set read timeout: {}", e)))?;
 
         let dest = SocketAddr::new(IpAddr::V4(dest_ip), 0);
 
         let mut results = Vec::new();
 
-        'finish: for ttl in 1..=self.max_hops {
+        'finish: for ttl in 1..=self.option.max_hops {
             if finished {
                 break;
             }
 
+            // TODO: OS will kill send if ttl is too small
             socket.set_ttl(ttl).map_err(|e| {
                 Error::new(Status::GenericFailure, format!("Failed to set TTL: {}", e))
             })?;
@@ -130,6 +139,10 @@ impl TraceTask {
 
                 icmp_packet.set_sequence_number(ttl as u16);
                 icmp_packet.set_identifier(std::process::id() as u16);
+
+                let checksum =
+                    pnet::packet::icmp::checksum(&IcmpPacket::new(icmp_packet.packet()).unwrap());
+                icmp_packet.set_checksum(checksum);
 
                 socket
                     .send_to(icmp_packet.packet(), &dest.into())
@@ -169,16 +182,7 @@ impl TraceTask {
                             }
                         }
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        hilog_info!("trace_route: timeout");
-                        std::thread::sleep(Duration::from_millis(1000));
-                        continue;
-                    }
-                    Err(e) => {
-                        let ee = e.to_string();
-                        let k = e.kind();
-                        hilog_info!(format!("trace_route: recv_from error: {} kind {}", ee, k));
-                        std::thread::sleep(Duration::from_millis(1000));
+                    Err(_) => {
                         continue;
                     }
                 }
@@ -200,14 +204,14 @@ impl TraceTask {
             })?;
 
         socket
-            .set_read_timeout(Some(Duration::from_millis(1000)))
+            .set_read_timeout(Some(Duration::from_millis(self.option.timeout as u64)))
             .map_err(|e| Error::from_reason(format!("Failed to set read timeout: {}", e)))?;
 
         let dest = SocketAddr::new(IpAddr::V6(dest_ip), 0);
 
         let mut results = Vec::new();
 
-        'finish: for ttl in 1..=self.max_hops {
+        'finish: for ttl in 1..=self.option.max_hops {
             if finished {
                 break;
             }
@@ -272,12 +276,7 @@ impl TraceTask {
                             }
                         }
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(10));
-                        continue;
-                    }
-                    Err(e) => {
-                        let ee = e.to_string();
+                    Err(_) => {
                         continue;
                     }
                 }
@@ -291,11 +290,12 @@ impl TraceTask {
 
 #[allow(unused)]
 #[napi(ts_return_type = "Promise<HopResult[]>")]
-fn trace_route(target: String, max_hops: Option<u32>) -> AsyncTask<TraceTask> {
-    let task = TraceTask {
-        target,
-        max_hops: max_hops.unwrap_or(30),
-    };
+fn trace_route(target: String, options: Option<TraceOption>) -> AsyncTask<TraceTask> {
+    let option = options.unwrap_or(TraceOption {
+        max_hops: 30,
+        timeout: 1000,
+        ip_version: None,
+    });
 
-    AsyncTask::new(task)
+    AsyncTask::new(TraceTask { target, option })
 }
