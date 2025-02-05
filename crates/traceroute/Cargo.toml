@@ -12,8 +12,8 @@ crate-type = ["cdylib"]
 napi-ohos        = { workspace = true, default-features = false, features = ["napi8", "async"] }
 napi-derive-ohos = { workspace = true }
 pnet             = { workspace = true }
-socket2          = { workspace = true }
 buffer           = { workspace = true }
+nix              = { workspace = true, features = ["net", "socket", "uio"] }
 
 ohos-hilog-binding = { workspace = true }
 
