@@ -13,4 +13,8 @@ buffer = { path = "buffer" }
 pnet    = { version = "0.33" }
 socket2 = { version = "0.5" }
 libc    = { version = "0.2" }
-nix     = { git = "https://github.com/richerfu/nix.git", branch = "master" }
+nix     = { git = "https://github.com/nix-rust/nix.git", branch = "master" }
+
+# Fixup for https://github.com/sfackler/rust-openssl/pull/2239
+[patch.crates-io]
+openssl-sys = { git = "https://github.com/richerfu/rust-openssl.git", branch = "master" }
