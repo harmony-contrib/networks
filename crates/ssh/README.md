@@ -8,6 +8,8 @@ use`ohpm` to install package.
 ohpm install @ohos-rs/ssh
 ```
 
+> Note: We don't use `AgentClient` to manage the private/public key.
+
 ## API
 
 ```ts
@@ -152,13 +154,13 @@ export declare class PublicKey {
 ## Usage
 
 ```ts
-import { connect, checkKnownHosts } from '@ohos-rs/ssh'
-const host = '11.37.146.57'
-const port = 222
+import { connect } from '@ohos-rs/ssh'
+const host = '192.168.31.171'
+const port = 2222
 
 const client = await connect(`${host}:${port}`, {
     checkServerKey: (key) => {
-        return checkKnownHosts(host, port, key)
+        return true
     }
 })
 
