@@ -1,10 +1,13 @@
 {
-  license: "MIT",
-  author: "richerfu",
-  name: "@ohos-rs/traceroute",
-  description: "A simple traceroute implementation in OpenHarmony/HarmonyNext with Rust",
-  main: "index.ets",
-  version: "0.0.1",
-  types: "libs/index.d.ts",
-  dependencies: {}
+  "license": "MIT",
+  "author": "richerfu",
+  "name": "@ohos-rs/traceroute",
+  "description": "A simple traceroute implementation in OpenHarmony/HarmonyNext with Rust",
+  "main": "index.ets",
+  "version": "0.1.0",
+  "types": "libs/index.d.ts",
+  "dependencies": {},
+  "keywords": ["traceroute", "harmony", "openharmony", "rust"],
+  "repository": "https://github.com/harmony-contrib/networks.git",
+  "homepage": "https://github.com/harmony-contrib/networks"
 }
