@@ -495,7 +495,6 @@ impl TraceTask {
                         // 检查是否到达目标
                         if addr == dest_ip.to_string() {
                             finished = true;
-                            break 'finish;
                         }
                     }
                     None => {
@@ -505,6 +504,9 @@ impl TraceTask {
             }
 
             results.push(res);
+            if finished {
+                break 'finish;
+            }
         }
 
         Ok(results)

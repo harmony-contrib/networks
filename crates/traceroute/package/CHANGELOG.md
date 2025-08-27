@@ -1,3 +1,7 @@
+# 0.1.1
+- Fix: Add the last hop result to final result.
+
+--- 
 # 0.1.0
 - Refactor: using non-blocking socket to implement.
 
