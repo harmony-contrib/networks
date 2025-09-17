@@ -2,6 +2,8 @@
 
 use napi_derive_ohos::napi;
 use napi_ohos::{bindgen_prelude::*, Task};
+use napi_ohos::{bindgen_prelude::Function, threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode}, Env};
+use std::sync::atomic::{AtomicBool, Ordering};
 use nix::sys::{
     socket::{
         recvfrom, recvmsg, sendto, setsockopt, socket, sockopt, AddressFamily, ControlMessageOwned,
@@ -28,6 +30,15 @@ use std::{
     time::Instant,
 };
 use std::{thread, time::Duration};
+use lazy_static::lazy_static;
+use std::sync::Mutex;
+use std::mem;
+
+lazy_static! {
+    static ref CALLBACK: Mutex<Option<ThreadsafeFunction<bool>>> = Mutex::new(None);
+    static ref SHOULD_STOP: AtomicBool = AtomicBool::new(false);
+    static ref RESULT: Mutex<Vec<HopResult>> = Mutex::new(Vec::new());
+}
 
 const ICMP_HEADER_SIZE: usize = 8;
 const ICMP_PAYLOAD_SIZE: usize = 32;
@@ -503,8 +514,15 @@ impl TraceTask {
                 }
             }
 
+            RESULT.lock().unwrap().push(res.clone());
             results.push(res);
+            if let Some(callback) = CALLBACK.lock().unwrap().as_ref() {
+                callback.call(Ok(true), ThreadsafeFunctionCallMode::NonBlocking);
+            }
             if finished {
+                break 'finish;
+            }
+            if SHOULD_STOP.load(Ordering::SeqCst) {
                 break 'finish;
             }
         }
@@ -580,7 +598,17 @@ impl TraceTask {
                 }
             }
 
+            RESULT.lock().unwrap().push(res.clone());
             results.push(res);
+            if let Some(callback) = CALLBACK.lock().unwrap().as_ref() {
+                callback.call(Ok(true), ThreadsafeFunctionCallMode::NonBlocking);
+            }
+            if finished {
+                break 'finish;
+            }
+            if SHOULD_STOP.load(Ordering::SeqCst) {
+                break 'finish;
+            }
         }
 
         Ok(results)
@@ -596,6 +624,33 @@ pub fn trace_route(target: String, options: Option<TraceOption>) -> AsyncTask<Tr
         ip_version: None,
         re_try: Some(3),
     });
-
+    RESULT.lock().unwrap().clear();
+    SHOULD_STOP.store(false, Ordering::SeqCst);
     AsyncTask::new(TraceTask { target, option })
+}
+
+
+#[napi(ts_return_type = "void")]
+pub fn stop_trace() {
+    SHOULD_STOP.store(true, Ordering::SeqCst);
+}
+
+#[napi]
+pub fn set_trace_listener(func: Function<bool>) {
+    let static_func: &'static Function<bool> = unsafe { mem::transmute(&func) };
+    let tsfn = static_func
+        .build_threadsafe_function()
+        .callee_handled::<true>()
+        .build()
+        .unwrap();
+
+    let mut guard = CALLBACK.lock().unwrap();
+    *guard = Some(tsfn);
+}
+
+#[allow(unused)]
+#[napi(ts_return_type = "HopResult | null")]
+pub fn get_trace_result() -> Result<Option<HopResult>> {
+    let results = RESULT.lock().unwrap();
+    Ok(results.last().cloned())
 }

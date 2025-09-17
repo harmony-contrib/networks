@@ -2469,6 +2469,7 @@ name = "traceroute"
 version = "0.1.0"
 dependencies = [
  "buffer",
+ "lazy_static",
  "napi-build-ohos",
  "napi-derive-ohos",
  "napi-ohos",
