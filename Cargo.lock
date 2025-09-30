@@ -369,7 +369,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec09e802f5081de6157da9a75701d6c713d8dc3ba52571fd4bd25f412644e8a6"
 dependencies = [
  "ctor-proc-macro",
- "dtor",
+ "dtor 0.0.6",
+]
+
+[[package]]
+name = "ctor"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67773048316103656a637612c4a62477603b777d91d9c62ff2290f9cde178fdb"
+dependencies = [
+ "ctor-proc-macro",
+ "dtor 0.1.0",
 ]
 
 [[package]]
@@ -520,7 +530,16 @@ version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97cbdf2ad6846025e8e25df05171abfb30e3ababa12ee0a0e44b9bbe570633a8"
 dependencies = [
- "dtor-proc-macro",
+ "dtor-proc-macro 0.0.5",
+]
+
+[[package]]
+name = "dtor"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e58a0764cddb55ab28955347b45be00ade43d4d6f3ba4bf3dc354e4ec9432934"
+dependencies = [
+ "dtor-proc-macro 0.0.6",
 ]
 
 [[package]]
@@ -528,6 +547,12 @@ name = "dtor-proc-macro"
 version = "0.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7454e41ff9012c00d53cf7f475c5e3afa3b91b7c90568495495e8d9bf47a1055"
+
+[[package]]
+name = "dtor-proc-macro"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f678cf4a922c215c63e0de95eb1ff08a958a81d47e485cf9da1e27bf6305cfa5"
 
 [[package]]
 name = "ecdsa"
@@ -1180,9 +1205,9 @@ dependencies = [
 
 [[package]]
 name = "napi-build-ohos"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "959f833e4ea8bec8f92b23b705b5558d42d8e63672c77b9b281b7228c5df6e88"
+checksum = "ff5542faaec5584833f5c16d8f7986380f40ee2f3960dabf7be876ab8ba60e5a"
 
 [[package]]
 name = "napi-derive-backend-ohos"
@@ -1204,7 +1229,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c844efa85d53b5adc3b326520f3a108c3a737b7534ee10d406f81884e7e71b3c"
 dependencies = [
  "convert_case",
- "ctor",
+ "ctor 0.4.3",
  "napi-derive-backend-ohos",
  "proc-macro2",
  "quote",
@@ -1213,13 +1238,13 @@ dependencies = [
 
 [[package]]
 name = "napi-ohos"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44cd7f1a2b5b17e763d8fcc33f3a9f426c0303a1fcb9b89d7c553308c3a1db97"
+checksum = "955605a90c7b81b14d442718959182bd3cb0b5de8548719a66a625f641b47c60"
 dependencies = [
  "anyhow",
  "bitflags",
- "ctor",
+ "ctor 0.5.0",
  "napi-build-ohos",
  "napi-sys-ohos",
  "nohash-hasher",
@@ -1229,9 +1254,9 @@ dependencies = [
 
 [[package]]
 name = "napi-sys-ohos"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff0b7e156bf62a778295ba4f130cde6c2fe07936ebf9448fab6ca0f7c7040682"
+checksum = "a38c9e77d10b35a278d7350e56cf2deb5db863bc5877d72c82fdc175eceb56da"
 dependencies = [
  "libloading",
 ]
