@@ -4,7 +4,7 @@ use napi_derive_ohos::napi;
 use napi_ohos::{
     bindgen_prelude::*,
     threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
-    Result, ScopedTask,
+    Error, Result, ScopedTask, Status,
 };
 use nix::sys::{
     socket::{
@@ -40,14 +40,14 @@ const POLL_INTERVAL_MS: u64 = 1; // 轮询间隔时间（毫秒）
 const MAX_POLL_ITERATIONS: u32 = 1000; // 最大轮询次数
 
 #[napi(object)]
-pub struct TraceOption<'a> {
+pub struct TraceOption<'env> {
     /// Max hops
     /// @default 64
-    pub max_hops: i32,
+    pub max_hops: Option<i32>,
     /// Timeout
     /// @default 1
     /// @unit second
-    pub timeout: i32,
+    pub timeout: Option<i32>,
     #[napi(ts_type = "'v4' | 'v6' | 'auto'")]
     pub ip_version: Option<String>,
     /// Retry times every hops
@@ -55,7 +55,8 @@ pub struct TraceOption<'a> {
     pub re_try: Option<i32>,
 
     /// Callback function when trace result
-    pub on_trace: Option<Function<'a, HopResult, ()>>,
+    #[napi(ts_type = "((err: Error | null, hop: HopResult) => void) | undefined")]
+    pub on_trace: Option<Function<'env, HopResult, ()>>,
 }
 
 pub struct BaseTraceOption {
@@ -613,13 +614,11 @@ impl TraceTask {
 pub fn trace_route<'env>(
     target: String,
     options: Option<TraceOption>,
+    signal: Option<AbortSignal>,
 ) -> Result<AsyncTask<TraceTask>> {
     let option = BaseTraceOption {
-        max_hops: options
-            .as_ref()
-            .and_then(|o| Some(o.max_hops))
-            .unwrap_or(64),
-        timeout: options.as_ref().and_then(|o| Some(o.timeout)).unwrap_or(1),
+        max_hops: options.as_ref().and_then(|o| o.max_hops).unwrap_or(64),
+        timeout: options.as_ref().and_then(|o| o.timeout).unwrap_or(1),
         ip_version: options
             .as_ref()
             .and_then(|o| o.ip_version.clone())
@@ -638,9 +637,19 @@ pub fn trace_route<'env>(
         })
         .transpose()?;
 
-    Ok(AsyncTask::new(TraceTask {
-        target,
-        option,
-        on_trace,
-    }))
+    match signal {
+        Some(signal) => Ok(AsyncTask::with_signal(
+            TraceTask {
+                target,
+                option,
+                on_trace,
+            },
+            signal,
+        )),
+        None => Ok(AsyncTask::new(TraceTask {
+            target,
+            option,
+            on_trace,
+        })),
+    }
 }
