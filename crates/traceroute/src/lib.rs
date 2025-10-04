@@ -20,7 +20,6 @@ use pnet::packet::icmpv6::{Icmpv6Code, Icmpv6Packet, Icmpv6Types};
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::Packet;
-use std::os::fd::AsRawFd;
 use std::str::FromStr;
 use std::{io::IoSliceMut, net::SocketAddrV6};
 use std::{
@@ -31,6 +30,7 @@ use std::{
     net::{Ipv4Addr, ToSocketAddrs},
     time::Instant,
 };
+use std::{os::fd::AsRawFd, sync::mpsc};
 use std::{thread, time::Duration};
 
 const ICMP_HEADER_SIZE: usize = 8;
@@ -70,6 +70,7 @@ pub struct TraceTask {
     target: String,
     option: BaseTraceOption,
     on_trace: Option<ThreadsafeFunction<HopResult, (), HopResult>>,
+    receiver: Option<mpsc::Receiver<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -480,6 +481,12 @@ impl TraceTask {
 
             let re_try = self.option.re_try;
             for probe in 0..re_try {
+                if let Some(receiver) = &self.receiver {
+                    if receiver.try_recv().is_ok() {
+                        return Err(Error::from_reason("Trace aborted"));
+                    }
+                }
+
                 // 创建ICMP数据包
                 let mut icmp_buffer = [0u8; BUFFER_SIZE];
                 let mut icmp_packet = MutableEchoRequestPacket::new(&mut icmp_buffer).unwrap();
@@ -557,6 +564,12 @@ impl TraceTask {
 
             let re_try = self.option.re_try;
             for probe in 0..re_try {
+                if let Some(receiver) = &self.receiver {
+                    if receiver.try_recv().is_ok() {
+                        return Err(Error::from_reason("Trace aborted"));
+                    }
+                }
+
                 // 创建ICMPv6数据包
                 let mut icmp_buffer = [0u8; BUFFER_SIZE];
                 let mut icmp_packet = Ipv6MutableEchoRequestPacket::new(&mut icmp_buffer).unwrap();
@@ -614,7 +627,6 @@ impl TraceTask {
 pub fn trace_route<'env>(
     target: String,
     options: Option<TraceOption>,
-    signal: Option<AbortSignal>,
 ) -> Result<AsyncTask<TraceTask>> {
     let option = BaseTraceOption {
         max_hops: options.as_ref().and_then(|o| o.max_hops).unwrap_or(64),
@@ -637,19 +649,52 @@ pub fn trace_route<'env>(
         })
         .transpose()?;
 
-    match signal {
-        Some(signal) => Ok(AsyncTask::with_signal(
-            TraceTask {
-                target,
-                option,
-                on_trace,
-            },
-            signal,
-        )),
-        None => Ok(AsyncTask::new(TraceTask {
-            target,
-            option,
-            on_trace,
-        })),
-    }
+    Ok(AsyncTask::new(TraceTask {
+        target,
+        option,
+        on_trace,
+        receiver: None,
+    }))
+}
+
+#[allow(unused)]
+#[napi(ts_return_type = "Promise<HopResult[]>")]
+pub fn trace_route_with_signal<'env>(
+    target: String,
+    signal: AbortSignal,
+    options: Option<TraceOption>,
+) -> Result<AsyncTask<TraceTask>> {
+    let option = BaseTraceOption {
+        max_hops: options.as_ref().and_then(|o| o.max_hops).unwrap_or(64),
+        timeout: options.as_ref().and_then(|o| o.timeout).unwrap_or(1),
+        ip_version: options
+            .as_ref()
+            .and_then(|o| o.ip_version.clone())
+            .unwrap_or(String::from("auto")),
+        re_try: options.as_ref().and_then(|o| o.re_try).unwrap_or(3),
+    };
+
+    let on_trace = options
+        .and_then(|o| o.on_trace)
+        .and_then(|cb| {
+            Some(
+                cb.build_threadsafe_function()
+                    .callee_handled::<true>()
+                    .build(),
+            )
+        })
+        .transpose()?;
+
+    let (sender, receiver) = mpsc::channel::<()>();
+
+    signal.on_abort(move || {
+        sender.send(()).unwrap();
+    });
+
+    Ok(AsyncTask::new(TraceTask {
+        target,
+        option,
+        on_trace,
+        receiver: Some(receiver),
+    }))
 }
