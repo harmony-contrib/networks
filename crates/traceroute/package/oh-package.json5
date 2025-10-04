@@ -4,7 +4,7 @@
   "name": "@ohos-rs/traceroute",
   "description": "A simple traceroute implementation in OpenHarmony/HarmonyNext with Rust",
   "main": "index.ets",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "types": "libs/index.d.ts",
   "dependencies": {},
   "keywords": ["traceroute", "harmony", "openharmony", "rust"],

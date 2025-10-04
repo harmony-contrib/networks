@@ -1,7 +1,11 @@
 #![allow(unused_assignments)]
 
 use napi_derive_ohos::napi;
-use napi_ohos::{bindgen_prelude::*, Task};
+use napi_ohos::{
+    bindgen_prelude::*,
+    threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
+    Error, Result, ScopedTask, Status,
+};
 use nix::sys::{
     socket::{
         recvfrom, recvmsg, sendto, setsockopt, socket, sockopt, AddressFamily, ControlMessageOwned,
@@ -16,7 +20,6 @@ use pnet::packet::icmpv6::{Icmpv6Code, Icmpv6Packet, Icmpv6Types};
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::Packet;
-use std::os::fd::AsRawFd;
 use std::str::FromStr;
 use std::{io::IoSliceMut, net::SocketAddrV6};
 use std::{
@@ -27,6 +30,7 @@ use std::{
     net::{Ipv4Addr, ToSocketAddrs},
     time::Instant,
 };
+use std::{os::fd::AsRawFd, sync::mpsc};
 use std::{thread, time::Duration};
 
 const ICMP_HEADER_SIZE: usize = 8;
@@ -35,27 +39,38 @@ const BUFFER_SIZE: usize = ICMP_HEADER_SIZE + ICMP_PAYLOAD_SIZE;
 const POLL_INTERVAL_MS: u64 = 1; // 轮询间隔时间（毫秒）
 const MAX_POLL_ITERATIONS: u32 = 1000; // 最大轮询次数
 
-#[derive(Debug)]
 #[napi(object)]
-pub struct TraceOption {
+pub struct TraceOption<'env> {
     /// Max hops
     /// @default 64
-    pub max_hops: i32,
+    pub max_hops: Option<i32>,
     /// Timeout
     /// @default 1
     /// @unit second
-    pub timeout: i32,
+    pub timeout: Option<i32>,
     #[napi(ts_type = "'v4' | 'v6' | 'auto'")]
     pub ip_version: Option<String>,
     /// Retry times every hops
     /// @default 3
     pub re_try: Option<i32>,
+
+    /// Callback function when trace result
+    #[napi(ts_type = "((err: Error | null, hop: HopResult) => void) | undefined")]
+    pub on_trace: Option<Function<'env, HopResult, ()>>,
 }
 
-#[derive(Debug)]
+pub struct BaseTraceOption {
+    pub max_hops: i32,
+    pub timeout: i32,
+    pub ip_version: String,
+    pub re_try: i32,
+}
+
 pub struct TraceTask {
     target: String,
-    option: TraceOption,
+    option: BaseTraceOption,
+    on_trace: Option<ThreadsafeFunction<HopResult, (), HopResult>>,
+    receiver: Option<mpsc::Receiver<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,12 +84,12 @@ pub struct HopResult {
     pub rtt: Vec<f64>,
 }
 
-impl Task for TraceTask {
+impl<'a> ScopedTask<'a> for TraceTask {
     type Output = Vec<HopResult>;
     type JsValue = Vec<HopResult>;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        let preferred_ip_version = self.option.ip_version.as_deref().unwrap_or("auto");
+        let preferred_ip_version = self.option.ip_version.clone();
         let dest_addr = match IpAddr::from_str(&self.target) {
             Ok(ip) => ip,
             Err(_) => {
@@ -91,7 +106,7 @@ impl Task for TraceTask {
                     return Err(Error::from_reason("No IP address found for host"));
                 }
 
-                match preferred_ip_version {
+                match preferred_ip_version.as_str() {
                     "v4" => addrs.into_iter().find(|ip| ip.is_ipv4()),
                     "v6" => addrs.into_iter().find(|ip| ip.is_ipv6()),
                     _ => Some(addrs[0]),
@@ -111,11 +126,11 @@ impl Task for TraceTask {
         }
     }
 
-    fn resolve(&mut self, _: Env, output: Vec<HopResult>) -> Result<Self::JsValue> {
+    fn resolve(&mut self, _: &'a Env, output: Vec<HopResult>) -> Result<Self::JsValue> {
         Ok(output)
     }
 
-    fn reject(&mut self, _: Env, err: Error) -> Result<Self::JsValue> {
+    fn reject(&mut self, _: &'a Env, err: Error) -> Result<Self::JsValue> {
         Err(err)
     }
 }
@@ -464,8 +479,14 @@ impl TraceTask {
                 rtt: Vec::new(),
             };
 
-            let re_try = self.option.re_try.unwrap_or(3);
+            let re_try = self.option.re_try;
             for probe in 0..re_try {
+                if let Some(receiver) = &self.receiver {
+                    if receiver.try_recv().is_ok() {
+                        return Err(Error::from_reason("Trace aborted"));
+                    }
+                }
+
                 // 创建ICMP数据包
                 let mut icmp_buffer = [0u8; BUFFER_SIZE];
                 let mut icmp_packet = MutableEchoRequestPacket::new(&mut icmp_buffer).unwrap();
@@ -503,6 +524,10 @@ impl TraceTask {
                 }
             }
 
+            if let Some(on_trace) = &self.on_trace {
+                on_trace.call(Ok(res.clone()), ThreadsafeFunctionCallMode::NonBlocking);
+            }
+
             results.push(res);
             if finished {
                 break 'finish;
@@ -537,8 +562,14 @@ impl TraceTask {
                 rtt: Vec::new(),
             };
 
-            let re_try = self.option.re_try.unwrap_or(3);
+            let re_try = self.option.re_try;
             for probe in 0..re_try {
+                if let Some(receiver) = &self.receiver {
+                    if receiver.try_recv().is_ok() {
+                        return Err(Error::from_reason("Trace aborted"));
+                    }
+                }
+
                 // 创建ICMPv6数据包
                 let mut icmp_buffer = [0u8; BUFFER_SIZE];
                 let mut icmp_packet = Ipv6MutableEchoRequestPacket::new(&mut icmp_buffer).unwrap();
@@ -571,16 +602,20 @@ impl TraceTask {
                         // 检查是否到达目标
                         if addr == dest_ip.to_string() {
                             finished = true;
-                            break 'finish;
                         }
                     }
-                    None => {
-                        // 超时，继续下一次尝试
-                    }
+                    _ => {}
                 }
             }
 
+            if let Some(on_trace) = &self.on_trace {
+                on_trace.call(Ok(res.clone()), ThreadsafeFunctionCallMode::NonBlocking);
+            }
+
             results.push(res);
+            if finished {
+                break 'finish;
+            }
         }
 
         Ok(results)
@@ -589,13 +624,77 @@ impl TraceTask {
 
 #[allow(unused)]
 #[napi(ts_return_type = "Promise<HopResult[]>")]
-pub fn trace_route(target: String, options: Option<TraceOption>) -> AsyncTask<TraceTask> {
-    let option = options.unwrap_or(TraceOption {
-        max_hops: 64,
-        timeout: 1,
-        ip_version: None,
-        re_try: Some(3),
+pub fn trace_route<'env>(
+    target: String,
+    options: Option<TraceOption>,
+) -> Result<AsyncTask<TraceTask>> {
+    let option = BaseTraceOption {
+        max_hops: options.as_ref().and_then(|o| o.max_hops).unwrap_or(64),
+        timeout: options.as_ref().and_then(|o| o.timeout).unwrap_or(1),
+        ip_version: options
+            .as_ref()
+            .and_then(|o| o.ip_version.clone())
+            .unwrap_or(String::from("auto")),
+        re_try: options.as_ref().and_then(|o| o.re_try).unwrap_or(3),
+    };
+
+    let on_trace = options
+        .and_then(|o| o.on_trace)
+        .and_then(|cb| {
+            Some(
+                cb.build_threadsafe_function()
+                    .callee_handled::<true>()
+                    .build(),
+            )
+        })
+        .transpose()?;
+
+    Ok(AsyncTask::new(TraceTask {
+        target,
+        option,
+        on_trace,
+        receiver: None,
+    }))
+}
+
+#[allow(unused)]
+#[napi(ts_return_type = "Promise<HopResult[]>")]
+pub fn trace_route_with_signal<'env>(
+    target: String,
+    signal: AbortSignal,
+    options: Option<TraceOption>,
+) -> Result<AsyncTask<TraceTask>> {
+    let option = BaseTraceOption {
+        max_hops: options.as_ref().and_then(|o| o.max_hops).unwrap_or(64),
+        timeout: options.as_ref().and_then(|o| o.timeout).unwrap_or(1),
+        ip_version: options
+            .as_ref()
+            .and_then(|o| o.ip_version.clone())
+            .unwrap_or(String::from("auto")),
+        re_try: options.as_ref().and_then(|o| o.re_try).unwrap_or(3),
+    };
+
+    let on_trace = options
+        .and_then(|o| o.on_trace)
+        .and_then(|cb| {
+            Some(
+                cb.build_threadsafe_function()
+                    .callee_handled::<true>()
+                    .build(),
+            )
+        })
+        .transpose()?;
+
+    let (sender, receiver) = mpsc::channel::<()>();
+
+    signal.on_abort(move || {
+        sender.send(()).unwrap();
     });
 
-    AsyncTask::new(TraceTask { target, option })
+    Ok(AsyncTask::new(TraceTask {
+        target,
+        option,
+        on_trace,
+        receiver: Some(receiver),
+    }))
 }
